@@ -31,7 +31,7 @@ OWN_FLAG="$STATE_DIR/owned-by-watcher"
 SEEN_FILE="$STATE_DIR/last-seen"
 LOG="${VNCSD_LOG:-$HOME/Library/Logs/vnc-single-display.log}"
 PORT="${VNCSD_PORT:-5900}"
-GRACE="${VNCSD_GRACE:-10}"   # seconds without a viewer before restoring
+GRACE="${VNCSD_GRACE:-5}"    # seconds without a viewer before restoring
 
 mkdir -p "$STATE_DIR" "$(dirname "$LOG")"
 
