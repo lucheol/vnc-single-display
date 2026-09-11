@@ -49,7 +49,13 @@ sed -e "s|@LABEL@|$LABEL|g" \
 plutil -lint "$AGENT" >/dev/null
 
 echo "==> loading launch agent"
+# bootout returns before the job is actually gone, and bootstrapping a label
+# that is still tearing down fails with "Input/output error". Wait it out.
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+for _ in $(seq 1 50); do
+    launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || break
+    sleep 0.2
+done
 launchctl bootstrap "gui/$(id -u)" "$AGENT"
 
 echo

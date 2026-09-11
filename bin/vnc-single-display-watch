@@ -28,9 +28,10 @@ set -u
 BIN="${VNCSD_BIN:-$HOME/.local/bin/vncdisplay}"
 STATE_DIR="${VNCSD_STATE_DIR:-$HOME/.local/state/vnc-single-display}"
 OWN_FLAG="$STATE_DIR/owned-by-watcher"
+SEEN_FILE="$STATE_DIR/last-seen"
 LOG="${VNCSD_LOG:-$HOME/Library/Logs/vnc-single-display.log}"
 PORT="${VNCSD_PORT:-5900}"
-GRACE="${VNCSD_GRACE:-20}"   # seconds without a viewer before restoring
+GRACE="${VNCSD_GRACE:-30}"   # seconds without a viewer before restoring
 
 mkdir -p "$STATE_DIR" "$(dirname "$LOG")"
 
@@ -38,7 +39,24 @@ log() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$LOG"; }
 
 viewers() { /usr/sbin/lsof -nP -iTCP:"$PORT" -sTCP:ESTABLISHED -t 2>/dev/null | grep -c . ; }
 
+# The grace period is measured from the last sign of a viewer, recorded on disk
+# so the log-stream subshell and the poll loop share one clock. A counter would
+# not work: it can only be reset by a poll that happens to catch the socket, and
+# a connection that drops between two polls would leave it already past the
+# threshold, restoring the layout mid-session and killing the very session that
+# just triggered the mirror.
+mark_seen() { date +%s >"$SEEN_FILE"; }
+
+seconds_since_seen() {
+    local seen now
+    seen=$(cat "$SEEN_FILE" 2>/dev/null) || seen=0
+    case "$seen" in ''|*[!0-9]*) seen=0 ;; esac
+    now=$(date +%s)
+    echo $(( now - seen ))
+}
+
 mirror_on() {
+    mark_seen
     [ -e "$OWN_FLAG" ] && return 0
     if "$BIN" is-mirrored; then
         log "already mirrored outside this watcher - leaving it alone"
@@ -55,7 +73,7 @@ mirror_on() {
 mirror_off() {
     [ -e "$OWN_FLAG" ] || return 0
     if "$BIN" unmirror; then
-        rm -f "$OWN_FLAG"
+        rm -f "$OWN_FLAG" "$SEEN_FILE"
         log "MIRROR OFF - original layout restored"
     else
         log "MIRROR OFF FAILED - still mirrored"
@@ -71,7 +89,7 @@ trap cleanup EXIT
 
 # A flag left behind by a killed watcher or a reboot means the layout is still
 # collapsed with nobody watching it. Undo that before doing anything else.
-if [ -e "$OWN_FLAG" ] && [ "$(viewers)" -eq 0 ]; then
+if [ -e "$OWN_FLAG" ] && [ "$(viewers)" -eq 0 ] && [ "$(seconds_since_seen)" -ge "$GRACE" ]; then
     log "startup reconcile: stale mirror with no viewer"
     mirror_off
 fi
@@ -94,14 +112,11 @@ log "watcher started (port $PORT, grace ${GRACE}s)"
 STREAM_PID=$!
 
 # Slow path: reconciles against real socket state, and owns the restore.
-idle=0
 while :; do
     if [ "$(viewers)" -gt 0 ]; then
-        idle=0
         mirror_on
-    else
-        idle=$((idle + 1))
-        [ "$idle" -ge "$GRACE" ] && mirror_off
+    elif [ -e "$OWN_FLAG" ] && [ "$(seconds_since_seen)" -ge "$GRACE" ]; then
+        mirror_off
     fi
     sleep 1
 done

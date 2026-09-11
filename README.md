@@ -116,9 +116,9 @@ tail -f ~/Library/Logs/vnc-single-display.log
 ```
 
 ```
-2026-09-10 23:53:33  watcher started (port 5900, grace 20s)
-2026-09-10 23:53:34  MIRROR ON
-2026-09-10 23:57:12  MIRROR OFF - original layout restored
+2026-09-11 00:09:01  watcher started (port 5900, grace 30s)
+2026-09-11 00:09:44  MIRROR ON
+2026-09-11 00:21:30  MIRROR OFF - original layout restored
 ```
 
 ## How it works
@@ -132,7 +132,7 @@ The watcher decides when:
 
 Restoring is treated as the hard requirement, with four independent guards:
 
-1. A grace period (default 20 s) before restoring, so a reconnect does not thrash the displays.
+1. A grace period (default 30 s), measured from the last sign of a viewer, before restoring. A reconnect during that window keeps the layout collapsed instead of thrashing the displays mid-session.
 2. An **ownership flag** on disk. The watcher restores only a mirror *it* created — a layout you mirrored yourself is left alone.
 3. An **exit trap**, so being killed or logged out restores the layout on the way down.
 4. A **startup reconcile**. If the flag survives a crash or a reboot, the next start finds it with no viewer connected and undoes it immediately.
@@ -150,7 +150,7 @@ Environment variables, read by the watcher. Set them in the launch agent at `~/L
 | Variable | Default | Meaning |
 |---|---|---|
 | `VNCSD_PORT` | `5900` | TCP port watched for viewers |
-| `VNCSD_GRACE` | `20` | Seconds with no viewer before restoring |
+| `VNCSD_GRACE` | `30` | Seconds with no viewer before restoring |
 | `VNCSD_BIN` | `~/.local/bin/vncdisplay` | Path to the helper |
 | `VNCSD_LOG` | `~/Library/Logs/vnc-single-display.log` | Activity log |
 | `VNCSD_STATE_DIR` | `~/.local/state/vnc-single-display` | Ownership flag location |
