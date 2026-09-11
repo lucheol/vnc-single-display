@@ -186,4 +186,9 @@ Restores the layout, unloads the agent, removes the binaries. Logs are kept.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[GNU General Public License v3.0](LICENSE).
+
+This is free software and it stays that way. You may use it, study it, change it
+and share it, including at work and including for money. What you may not do is
+make it proprietary: anything you distribute that is built on this has to ship its
+own source under the GPL too, so no closed-source product can be carved out of it.
