@@ -29,40 +29,63 @@ BIN="${VNCSD_BIN:-$HOME/.local/bin/vncdisplay}"
 STATE_DIR="${VNCSD_STATE_DIR:-$HOME/.local/state/vnc-single-display}"
 OWN_FLAG="$STATE_DIR/owned-by-watcher"
 SEEN_FILE="$STATE_DIR/last-seen"
+START_FILE="$STATE_DIR/streak-start"
+LOCK_DIR="$STATE_DIR/lock"
 LOG="${VNCSD_LOG:-$HOME/Library/Logs/vnc-single-display.log}"
 PORT="${VNCSD_PORT:-5900}"
-GRACE="${VNCSD_GRACE:-5}"    # seconds without a viewer before restoring
+STABLE="${VNCSD_STABLE:-8}"  # a session at least this long counts as deliberate
+GRACE="${VNCSD_GRACE:-5}"    # how long to hold the mirror after a short session
 
 mkdir -p "$STATE_DIR" "$(dirname "$LOG")"
 
 log() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$LOG"; }
+now() { date +%s; }
 
 # Counted from netstat rather than lsof: the screen-sharing daemon runs as root,
 # and an unprivileged lsof cannot list another user's sockets, so it reports no
 # viewers even while a session is live. netstat needs no privilege. Matching on
 # the local address keeps a loopback connection from being counted twice.
+# The dot before the port must be matched literally. Unescaped it is a regex
+# wildcard, and the local address of any outgoing connection that happens to be
+# assigned an ephemeral port ending in the same digits - 55900 or 65900 for the
+# default 5900, both inside the 49152-65535 range macOS allocates from - would
+# be counted as a viewer and collapse the layout with nobody connected.
 viewers() {
     /usr/sbin/netstat -an -p tcp 2>/dev/null \
-        | awk -v port=".$PORT" '$4 ~ port"$" && $6 == "ESTABLISHED" { n++ } END { print n + 0 }'
+        | awk -v port="$PORT" '$4 ~ "\\."port"$" && $6 == "ESTABLISHED" { n++ } END { print n + 0 }'
 }
 
-# The grace period is measured from the last sign of a viewer, recorded on disk
-# so the log-stream subshell and the poll loop share one clock. A counter would
-# not work: it can only be reset by a poll that happens to catch the socket, and
-# a connection that drops between two polls would leave it already past the
-# threshold, restoring the layout mid-session and killing the very session that
-# just triggered the mirror.
-mark_seen() { date +%s >"$SEEN_FILE"; }
-
-seconds_since_seen() {
-    local seen now
-    seen=$(cat "$SEEN_FILE" 2>/dev/null) || seen=0
-    case "$seen" in ''|*[!0-9]*) seen=0 ;; esac
-    now=$(date +%s)
-    echo $(( now - seen ))
+read_epoch() {
+    local v
+    v=$(cat "$1" 2>/dev/null) || v=0
+    case "$v" in ''|*[!0-9]*) v=0 ;; esac
+    echo "$v"
 }
 
-mirror_on() {
+# Records a viewer sighting, and tracks how long the current unbroken run of
+# sightings has lasted. Sightings more than a couple of seconds apart belong to
+# different connections, which is what separates one real session from the
+# rapid connect-fail-retry loop a client falls into when a handshake breaks.
+mark_seen() {
+    local t prev
+    t=$(now)
+    prev=$(read_epoch "$SEEN_FILE")
+    if [ $(( t - prev )) -gt 2 ]; then echo "$t" >"$START_FILE"; fi
+    echo "$t" >"$SEEN_FILE"
+}
+
+streak_length() { echo $(( $(read_epoch "$SEEN_FILE") - $(read_epoch "$START_FILE") )); }
+idle_seconds()  { echo $(( $(now) - $(read_epoch "$SEEN_FILE") )); }
+
+# Every path that reconfigures displays runs through here. The log reader and
+# the poll loop are separate processes and can reach it at the same moment.
+with_lock() {
+    mkdir "$LOCK_DIR" 2>/dev/null || return 0
+    "$@"
+    rmdir "$LOCK_DIR" 2>/dev/null
+}
+
+do_mirror_on() {
     mark_seen
     [ -e "$OWN_FLAG" ] && return 0
     if "$BIN" is-mirrored; then
@@ -76,54 +99,75 @@ mirror_on() {
         log "MIRROR ON FAILED"
     fi
 }
+mirror_on() { with_lock do_mirror_on; }
 
-mirror_off() {
+do_mirror_off() {
     [ -e "$OWN_FLAG" ] || return 0
     if "$BIN" unmirror; then
-        rm -f "$OWN_FLAG" "$SEEN_FILE"
-        log "MIRROR OFF - original layout restored"
+        rm -f "$OWN_FLAG" "$SEEN_FILE" "$START_FILE"
+        log "MIRROR OFF - original layout restored after ${1:-?}"
     else
         log "MIRROR OFF FAILED - still mirrored"
+    fi
+}
+mirror_off() { with_lock do_mirror_off "$@"; }
+
+# A session long enough to have been used is assumed to have ended because
+# somebody closed it, so the layout comes back at once. A session that barely
+# started is a failed handshake, and the client is about to try again: holding
+# the mirror through that gap is the whole reason the grace period exists.
+restore_if_due() {
+    [ -e "$OWN_FLAG" ] || return 0
+    [ "$(viewers)" -gt 0 ] && return 0
+    local streak
+    streak=$(streak_length)
+    if [ "$streak" -ge "$STABLE" ]; then
+        mirror_off "a ${streak}s session"
+    elif [ "$(idle_seconds)" -ge "$GRACE" ]; then
+        mirror_off "${GRACE}s idle following a ${streak}s session"
     fi
 }
 
 cleanup() {
     [ -n "${STREAM_PID:-}" ] && kill "$STREAM_PID" 2>/dev/null
-    mirror_off
+    rmdir "$LOCK_DIR" 2>/dev/null
+    do_mirror_off "watcher shutdown"
 }
 trap 'cleanup; exit 0' TERM INT HUP
 trap cleanup EXIT
 
 # A flag left behind by a killed watcher or a reboot means the layout is still
 # collapsed with nobody watching it. Undo that before doing anything else.
-if [ -e "$OWN_FLAG" ] && [ "$(viewers)" -eq 0 ] && [ "$(seconds_since_seen)" -ge "$GRACE" ]; then
+if [ -e "$OWN_FLAG" ] && [ "$(viewers)" -eq 0 ] && [ "$(idle_seconds)" -ge "$GRACE" ]; then
     log "startup reconcile: stale mirror with no viewer"
-    mirror_off
+    mirror_off "a stale mirror"
 fi
 
-log "watcher started (port $PORT, grace ${GRACE}s)"
+log "watcher started (port $PORT, stable ${STABLE}s, grace ${GRACE}s)"
 
-# Fast path. The window between the daemon accepting the socket and reading the
-# first frame is about one second, so polling alone reacts too late; this fires
-# within milliseconds and gives the reconfiguration a chance to land in time.
+# The daemon announces both ends of a session, so neither has to wait for the
+# next poll. On connect that matters because the window between the socket being
+# accepted and the first frame being read is about a second; on disconnect it is
+# what makes the layout come back immediately instead of up to a second later.
 /usr/bin/log stream --level debug --style compact \
-    --predicate 'process == "screensharingd" AND eventMessage CONTAINS "accept new screen sharing connection"' \
+    --predicate 'process == "screensharingd" AND (eventMessage CONTAINS "accept new screen sharing connection" OR eventMessage CONTAINS "closing index")' \
     2>/dev/null | while IFS= read -r line; do
         # log stream opens with a banner that quotes the predicate back, so the
         # trigger text appears before any real event. Event lines always start
         # with a timestamp; anything else is header noise.
         case "$line" in
             [0-9]*"accept new screen sharing connection"*) mirror_on ;;
+            [0-9]*"closing index"*) sleep 0.4; restore_if_due ;;
         esac
     done &
 STREAM_PID=$!
 
-# Slow path: reconciles against real socket state, and owns the restore.
+# Slow path: reconciles against real socket state, and backs up both decisions.
 while :; do
     if [ "$(viewers)" -gt 0 ]; then
         mirror_on
-    elif [ -e "$OWN_FLAG" ] && [ "$(seconds_since_seen)" -ge "$GRACE" ]; then
-        mirror_off
+    else
+        restore_if_due
     fi
     sleep 1
 done
