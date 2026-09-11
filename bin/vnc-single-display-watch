@@ -1,0 +1,91 @@
+#!/bin/bash
+# Collapses the display layout to a single origin while a screen-sharing viewer
+# is connected, and restores the multi-display layout once it leaves.
+#
+# Restoring is the hard requirement. The ownership flag, the startup reconcile
+# and the exit trap all exist so the original layout comes back even if this
+# process is killed, crashes, or the machine reboots mid-session. A layout the
+# user mirrored themselves is never touched.
+
+set -u
+
+BIN="${VNCSD_BIN:-$HOME/.local/bin/vncdisplay}"
+STATE_DIR="${VNCSD_STATE_DIR:-$HOME/.local/state/vnc-single-display}"
+OWN_FLAG="$STATE_DIR/owned-by-watcher"
+LOG="${VNCSD_LOG:-$HOME/Library/Logs/vnc-single-display.log}"
+PORT="${VNCSD_PORT:-5900}"
+GRACE="${VNCSD_GRACE:-20}"   # seconds without a viewer before restoring
+
+mkdir -p "$STATE_DIR" "$(dirname "$LOG")"
+
+log() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$LOG"; }
+
+viewers() { /usr/sbin/lsof -nP -iTCP:"$PORT" -sTCP:ESTABLISHED -t 2>/dev/null | grep -c . ; }
+
+mirror_on() {
+    [ -e "$OWN_FLAG" ] && return 0
+    if "$BIN" is-mirrored; then
+        log "already mirrored outside this watcher - leaving it alone"
+        return 0
+    fi
+    if "$BIN" mirror; then
+        : >"$OWN_FLAG"
+        log "MIRROR ON"
+    else
+        log "MIRROR ON FAILED"
+    fi
+}
+
+mirror_off() {
+    [ -e "$OWN_FLAG" ] || return 0
+    if "$BIN" unmirror; then
+        rm -f "$OWN_FLAG"
+        log "MIRROR OFF - original layout restored"
+    else
+        log "MIRROR OFF FAILED - still mirrored"
+    fi
+}
+
+cleanup() {
+    [ -n "${STREAM_PID:-}" ] && kill "$STREAM_PID" 2>/dev/null
+    mirror_off
+}
+trap 'cleanup; exit 0' TERM INT HUP
+trap cleanup EXIT
+
+# A flag left behind by a killed watcher or a reboot means the layout is still
+# collapsed with nobody watching it. Undo that before doing anything else.
+if [ -e "$OWN_FLAG" ] && [ "$(viewers)" -eq 0 ]; then
+    log "startup reconcile: stale mirror with no viewer"
+    mirror_off
+fi
+
+log "watcher started (port $PORT, grace ${GRACE}s)"
+
+# Fast path. The window between the daemon accepting the socket and reading the
+# first frame is about one second, so polling alone reacts too late; this fires
+# within milliseconds and gives the reconfiguration a chance to land in time.
+/usr/bin/log stream --level debug --style compact \
+    --predicate 'process == "screensharingd" AND eventMessage CONTAINS "accept new screen sharing connection"' \
+    2>/dev/null | while IFS= read -r line; do
+        # log stream opens with a banner that quotes the predicate back, so the
+        # trigger text appears before any real event. Event lines always start
+        # with a timestamp; anything else is header noise.
+        case "$line" in
+            [0-9]*"accept new screen sharing connection"*) mirror_on ;;
+        esac
+    done &
+STREAM_PID=$!
+
+# Slow path: reconciles against real socket state, and owns the restore.
+idle=0
+while :; do
+    if [ "$(viewers)" -gt 0 ]; then
+        idle=0
+        mirror_on
+    else
+        idle=$((idle + 1))
+        [ "$idle" -ge "$GRACE" ] && mirror_off
+    fi
+    sleep 1
+done
