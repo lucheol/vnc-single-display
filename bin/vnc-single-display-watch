@@ -31,13 +31,20 @@ OWN_FLAG="$STATE_DIR/owned-by-watcher"
 SEEN_FILE="$STATE_DIR/last-seen"
 LOG="${VNCSD_LOG:-$HOME/Library/Logs/vnc-single-display.log}"
 PORT="${VNCSD_PORT:-5900}"
-GRACE="${VNCSD_GRACE:-30}"   # seconds without a viewer before restoring
+GRACE="${VNCSD_GRACE:-10}"   # seconds without a viewer before restoring
 
 mkdir -p "$STATE_DIR" "$(dirname "$LOG")"
 
 log() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$LOG"; }
 
-viewers() { /usr/sbin/lsof -nP -iTCP:"$PORT" -sTCP:ESTABLISHED -t 2>/dev/null | grep -c . ; }
+# Counted from netstat rather than lsof: the screen-sharing daemon runs as root,
+# and an unprivileged lsof cannot list another user's sockets, so it reports no
+# viewers even while a session is live. netstat needs no privilege. Matching on
+# the local address keeps a loopback connection from being counted twice.
+viewers() {
+    /usr/sbin/netstat -an -p tcp 2>/dev/null \
+        | awk -v port=".$PORT" '$4 ~ port"$" && $6 == "ESTABLISHED" { n++ } END { print n + 0 }'
+}
 
 # The grace period is measured from the last sign of a viewer, recorded on disk
 # so the log-stream subshell and the poll loop share one clock. A counter would

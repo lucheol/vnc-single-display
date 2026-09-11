@@ -116,9 +116,9 @@ tail -f ~/Library/Logs/vnc-single-display.log
 ```
 
 ```
-2026-09-11 00:09:01  watcher started (port 5900, grace 30s)
-2026-09-11 00:09:44  MIRROR ON
-2026-09-11 00:21:30  MIRROR OFF - original layout restored
+2026-09-11 00:13:41  watcher started (port 5900, grace 10s)
+2026-09-11 00:14:02  MIRROR ON
+2026-09-11 00:31:18  MIRROR OFF - original layout restored
 ```
 
 ## How it works
@@ -128,11 +128,11 @@ tail -f ~/Library/Logs/vnc-single-display.log
 The watcher decides when:
 
 - **Connect** is detected from the system log, on `screensharingd` accepting a socket. The window between that and the first frame read is about one second, so polling alone reacts too late.
-- **Disconnect** is detected by polling for established TCP connections on port 5900, which reconciles against real socket state rather than log semantics.
+- **Disconnect** is detected by polling `netstat` for established TCP connections on port 5900, which reconciles against real socket state rather than log semantics. It has to be `netstat` and not `lsof`: the screen-sharing daemon runs as root, and an unprivileged `lsof` cannot list another user's sockets, so it reports no viewers even while a session is live.
 
 Restoring is treated as the hard requirement, with four independent guards:
 
-1. A grace period (default 30 s), measured from the last sign of a viewer, before restoring. A reconnect during that window keeps the layout collapsed instead of thrashing the displays mid-session.
+1. A grace period (default 10 s), measured from the moment the last viewer actually went away, before restoring. A reconnect inside that window keeps the layout collapsed instead of thrashing the displays mid-session. Lower it to 5 for a snappier restore, or raise it if you reconnect a lot.
 2. An **ownership flag** on disk. The watcher restores only a mirror *it* created — a layout you mirrored yourself is left alone.
 3. An **exit trap**, so being killed or logged out restores the layout on the way down.
 4. A **startup reconcile**. If the flag survives a crash or a reboot, the next start finds it with no viewer connected and undoes it immediately.
@@ -150,12 +150,12 @@ Environment variables, read by the watcher. Set them in the launch agent at `~/L
 | Variable | Default | Meaning |
 |---|---|---|
 | `VNCSD_PORT` | `5900` | TCP port watched for viewers |
-| `VNCSD_GRACE` | `30` | Seconds with no viewer before restoring |
+| `VNCSD_GRACE` | `10` | Seconds with no viewer before restoring |
 | `VNCSD_BIN` | `~/.local/bin/vncdisplay` | Path to the helper |
 | `VNCSD_LOG` | `~/Library/Logs/vnc-single-display.log` | Activity log |
 | `VNCSD_STATE_DIR` | `~/.local/state/vnc-single-display` | Ownership flag location |
 
-Raise `VNCSD_GRACE` if you reconnect often and want to avoid the displays flipping back and forth.
+Lower `VNCSD_GRACE` to about 5 for a faster restore after you close the session. Raise it if you reconnect often and want to avoid the displays flipping back and forth.
 
 ## Troubleshooting
 
@@ -173,6 +173,8 @@ tail -20 ~/Library/Logs/vnc-single-display.log
 **It says it is leaving the layout alone.** The displays were already mirrored when the connection arrived, so the watcher takes no ownership and will not restore anything. That is deliberate.
 
 **Stuck mirrored.** `vncdisplay unmirror` fixes it immediately. If it keeps happening, the log will say which guard failed.
+
+**Restoring feels slow.** It waits `VNCSD_GRACE` seconds after the last viewer leaves, so a client that reconnects does not flip the displays mid-session. Set it to 5 if you would rather have it snap back.
 
 **Non-standard port.** If screen sharing runs somewhere other than 5900, set `VNCSD_PORT`.
 
