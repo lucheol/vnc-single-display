@@ -182,6 +182,8 @@ tail -20 ~/Library/Logs/vnc-single-display.log
 
 **Stuck mirrored.** `vncdisplay unmirror` fixes it immediately. If it keeps happening, the log will say which guard failed.
 
+**Nothing happens on connect, and the log repeats `MIRROR OFF FAILED - still mirrored`.** The ownership flag outlived the mirror it described: something restored the layout without the watcher noticing, and the watcher keeps retrying a restore that has nothing left to undo. Because it will not mirror a layout it believes it already owns, every later connection is skipped. The watcher now reconciles the flag against the real display state and clears it on its own, so this resolves itself within a second. To clear it by hand, remove `~/.local/state/vnc-single-display/owned-by-watcher` and restart the agent with `launchctl kickstart -k gui/$(id -u)/io.github.lucheol.vnc-single-display`.
+
 **Restoring feels slow.** Closing a session that ran for at least `VNCSD_STABLE` seconds restores the layout immediately. If yours are shorter than that, they are being treated as failed attempts and held for `VNCSD_GRACE`; lower `VNCSD_STABLE`.
 
 **Non-standard port.** If screen sharing runs somewhere other than 5900, set `VNCSD_PORT`.
