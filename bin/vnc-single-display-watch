@@ -87,7 +87,13 @@ with_lock() {
 
 do_mirror_on() {
     mark_seen
-    [ -e "$OWN_FLAG" ] && return 0
+    # A flag that outlived the mirror it described would suppress every later
+    # session, since the watcher skips mirroring whatever it already owns.
+    if [ -e "$OWN_FLAG" ]; then
+        "$BIN" is-mirrored && return 0
+        rm -f "$OWN_FLAG"
+        log "ownership flag cleared - the layout was no longer mirrored"
+    fi
     if "$BIN" is-mirrored; then
         log "already mirrored outside this watcher - leaving it alone"
         return 0
@@ -106,6 +112,12 @@ do_mirror_off() {
     if "$BIN" unmirror; then
         rm -f "$OWN_FLAG" "$SEEN_FILE" "$START_FILE"
         log "MIRROR OFF - original layout restored after ${1:-?}"
+    elif ! "$BIN" is-mirrored; then
+        # The layout is already extended, so something else restored it. The
+        # flag has to go even though the restore failed, or every following
+        # tick retries a restore that has nothing left to undo.
+        rm -f "$OWN_FLAG" "$SEEN_FILE" "$START_FILE"
+        log "ownership flag cleared - the layout was already restored"
     else
         log "MIRROR OFF FAILED - still mirrored"
     fi

@@ -76,13 +76,29 @@ func setMirroring(_ on: Bool) -> Bool {
         fail("single display; nothing to do")
         return true
     }
+    // A transaction that asks for the state the displays are already in is
+    // rejected with kCGErrorIllegalArgument, so unmirroring an extended layout
+    // would report a failure for a layout that is already correct. Requesting
+    // nothing is the success case: there is nothing left to change.
+    let target: CGDirectDisplayID = on ? main : NULL_DISPLAY
+    let pending = others.filter { CGDisplayMirrorsDisplay($0) != target }
+    guard !pending.isEmpty else { return true }
+
     var config: CGDisplayConfigRef?
     guard CGBeginDisplayConfiguration(&config) == .success, let config else {
         fail("CGBeginDisplayConfiguration failed")
         return false
     }
-    for id in others {
-        CGConfigureDisplayMirrorOfDisplay(config, id, on ? main : NULL_DISPLAY)
+    for id in pending {
+        let staged = CGConfigureDisplayMirrorOfDisplay(config, id, target)
+        guard staged == .success else {
+            // Completing a transaction that staged nothing succeeds, so a
+            // discarded error here would be reported as a reconfiguration that
+            // worked while the layout never moved.
+            fail("CGConfigureDisplayMirrorOfDisplay failed for display \(id): \(staged.rawValue)")
+            CGCancelDisplayConfiguration(config)
+            return false
+        }
     }
     let result = CGCompleteDisplayConfiguration(config, .permanently)
     guard result == .success else {
